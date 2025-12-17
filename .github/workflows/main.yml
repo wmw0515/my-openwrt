@@ -14,13 +14,10 @@ jobs:
 
       - name: Cleanup Space
         run: |
-          # 强制删除大目录，即使不存在也不会报错
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/docker/Volumes || true
-          # 使用 || true 忽略卸载时的包缺失错误
           sudo apt-get remove -y '^dotnet-.*' '^aspnetcore-.*' 'php.*' 'google-cloud-sdk' 'azure-cli' 'microsoft-edge-dev' 'firefox' 'mono-devel' || true
           sudo apt-get autoremove -y || true
           sudo apt-get clean || true
-          df -h
 
       - name: Init Environment
         run: |
@@ -34,20 +31,32 @@ jobs:
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 写入核心配置
+          
+          # --- 核心配置区 ---
           echo "CONFIG_TARGET_x86=y" > .config
           echo "CONFIG_TARGET_x86_64=y" >> .config
           echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
           echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
           echo "CONFIG_PACKAGE_kmod-usb-net-rtl8152=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-aria2=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-samba4=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-dockerman=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-diskman=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
+          
+          # --- 网络拓扑硬编码 (192.168.2.1 | eth0=WAN | eth1=LAN) ---
+          # 1. 修改默认 IP
+          sed -i 's/192.168.1.1/192.168.2.1/g' package/base-files/files/bin/config_generate
+          
+          # 2. 修改网口映射与上网模式 (WAN口设为dhcp，LAN口绑定eth1)
+          # 我们直接修改系统默认生成的网络配置文件模板
+          sed -i '/set network.$1.ipaddr/a \\t\t\tset network.lan.device=eth1\n\t\t\tset network.wan=interface\n\t\t\tset network.wan.device=eth0\n\t\t\tset network.wan.proto=dhcp' package/base-files/files/bin/config_generate
+          
           make defconfig
 
-      - name: Compile
+      - name: Download and Compile
         run: |
           cd openwrt
           make download -j8
