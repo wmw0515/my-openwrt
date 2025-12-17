@@ -10,7 +10,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Init Space
         run: |
@@ -43,7 +43,7 @@ jobs:
           make -j$(nproc) || make -j1 V=s
 
       - name: Upload Firmware
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Firmware
           path: openwrt/bin/targets/x86/64/*.img.gz
