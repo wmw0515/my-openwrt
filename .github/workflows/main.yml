@@ -14,10 +14,12 @@ jobs:
 
       - name: Cleanup Space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/docker/Volumes
-          sudo apt-get remove -y '^dotnet-.*' '^aspnetcore-.*' 'php.*' 'google-cloud-sdk' 'azure-cli' 'microsoft-edge-dev' 'firefox' 'mono-devel'
-          sudo apt-get autoremove -y
-          sudo apt-get clean
+          # 强制删除大目录，即使不存在也不会报错
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/docker/Volumes || true
+          # 使用 || true 忽略卸载时的包缺失错误
+          sudo apt-get remove -y '^dotnet-.*' '^aspnetcore-.*' 'php.*' 'google-cloud-sdk' 'azure-cli' 'microsoft-edge-dev' 'firefox' 'mono-devel' || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean || true
           df -h
 
       - name: Init Environment
