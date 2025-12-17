@@ -12,7 +12,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Init Space
+      - name: Cleanup Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/docker/Volumes
+          sudo apt-get remove -y '^dotnet-.*' '^aspnetcore-.*' 'php.*' 'google-cloud-sdk' 'azure-cli' 'microsoft-edge-dev' 'firefox' 'mono-devel'
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h
+
+      - name: Init Environment
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo apt-get update
@@ -24,6 +32,7 @@ jobs:
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # 写入核心配置
           echo "CONFIG_TARGET_x86=y" > .config
           echo "CONFIG_TARGET_x86_64=y" >> .config
           echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
