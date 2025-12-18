@@ -41,29 +41,40 @@ jobs:
           git clone --depth 1 https://github.com/coolsnowwolf/lede openwrt
           cd openwrt
 
-          # 1) 更新 feeds（先按 lede 默认）
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 2) 额外拉取你“必须要有”的第三方插件（避免 .config 写了但实际不存在）
-          # Passwall（含 Argo/Reality/VLESS 等常见能力，节点兼容 Argo 诉求）
+          # Passwall
           rm -rf package/passwall || true
           git clone --depth 1 https://github.com/xiaorouji/openwrt-passwall package/passwall
 
-          # Diskman（磁盘管理）
+          # Diskman
           rm -rf package/luci-app-diskman || true
           git clone --depth 1 https://github.com/lisaac/luci-app-diskman package/luci-app-diskman
 
-          # 再跑一次 feeds 安装，确保依赖能被识别
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # ✅ 强制移除 autosamba，避免与 samba4-server 冲突（文件 /etc/hotplug.d/block/20-smb）
+          # ✅ 强制移除 autosamba（避免与 samba4-server 冲突）
           rm -rf package/feeds/luci/luci-app-autosamba \
                  package/feeds/packages/autosamba \
                  package/autosamba 2>/dev/null || true
 
-          # 3) 固化你的网络拓扑：LAN=eth1 / WAN=eth0 / LAN IP=192.168.2.1
+          # ✅ 关键：opkg 自检与自动修复（避免你现在这个 No rule 报错）
+          if [ ! -f package/system/opkg/Makefile ]; then
+            echo "[FATAL] package/system/opkg/Makefile not found. Try to restore from git..."
+            ls -la package/system || true
+            git checkout -- package/system/opkg || true
+          fi
+
+          if [ ! -f package/system/opkg/Makefile ]; then
+            echo "[FATAL] opkg still missing. Abort early to avoid wasting hours."
+            echo "Tree snapshot:"
+            find package/system -maxdepth 2 -type f -name Makefile -print | head -n 200 || true
+            exit 2
+          fi
+
+          # 固化网络：LAN=eth1 / WAN=eth0 / 192.168.2.1
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/99-fixed-network <<'EOF'
           #!/bin/sh
@@ -83,38 +94,31 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-fixed-network
 
-          # 4) 写入 .config（核心：ROOTFS 10G）
+          # .config（保持你的原需求：10G ROOTFS + Passwall + Transmission Web + Diskman + Samba4）
           cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_DEVICE_generic=y
 
-          # LuCI 中文
           CONFIG_LUCI_LANG_zh_Hans=y
 
-          # ===== 关键：镜像分区 =====
           CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=10240
           CONFIG_TARGET_IMAGES_GZ=y
 
-          # ===== USB 网卡驱动：RTL8152/8153 =====
           CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
 
-          # ===== 科学上网：Passwall（兼容 Argo/Reality/VLESS 等常见模式）=====
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
 
-          # ===== 远程下载（必须有前端页面）=====
           CONFIG_PACKAGE_luci-app-transmission=y
           CONFIG_PACKAGE_transmission-daemon=y
           CONFIG_PACKAGE_transmission-web-control=y
 
-          # ===== 磁盘/文件共享：Diskman + Samba4 =====
           CONFIG_PACKAGE_luci-app-diskman=y
           CONFIG_PACKAGE_luci-app-samba4=y
           CONFIG_PACKAGE_samba4-server=y
 
-          # 文件系统/挂载常用组件
           CONFIG_PACKAGE_block-mount=y
           CONFIG_PACKAGE_kmod-fs-ext4=y
           CONFIG_PACKAGE_kmod-usb-storage=y
@@ -122,14 +126,12 @@ jobs:
           CONFIG_PACKAGE_kmod-scsi-core=y
           CONFIG_PACKAGE_kmod-scsi-generic=y
 
-          # 磁盘工具
           CONFIG_PACKAGE_fdisk=y
           CONFIG_PACKAGE_lsblk=y
           CONFIG_PACKAGE_parted=y
           CONFIG_PACKAGE_resize2fs=y
           CONFIG_PACKAGE_e2fsprogs=y
 
-          # ===== 网页终端 =====
           CONFIG_PACKAGE_luci-app-ttyd=y
 
           # ✅ 禁用 autosamba（否则与 samba4-server 冲突）
@@ -150,11 +152,20 @@ jobs:
 
       - name: Final Compile
         run: |
+          set -e
           cd openwrt
           make tools/compile -j$(nproc) || make tools/compile -j1 V=s
           make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
-          make -j$(nproc) || make -j1 V=s
-          df -h
+
+          # 用 V=s 避免“看起来卡住”
+          (make -j$(nproc) V=s || make -j1 V=s) || {
+            echo "===== DF ====="; df -h || true
+            echo "===== Check opkg path ====="
+            ls -la package/system/opkg || true
+            echo "===== Find opkg Makefile ====="
+            find package/system -maxdepth 2 -type f -name Makefile -print | grep -i opkg || true
+            exit 2
+          }
 
       - name: Upload Firmware
         uses: actions/upload-artifact@v4
