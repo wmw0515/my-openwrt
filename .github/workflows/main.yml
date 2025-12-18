@@ -8,76 +8,150 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Cleanup Space
         run: |
-          # 强制腾出空间，解决 No space left on device
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/docker/Volumes || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup /var/lib/docker/volumes || true
           sudo apt-get remove -y '^dotnet-.*' '^aspnetcore-.*' 'php.*' 'google-cloud-sdk' 'azure-cli' 'microsoft-edge-dev' 'firefox' 'mono-devel' || true
           sudo apt-get autoremove -y || true
           sudo apt-get clean || true
+          df -h
 
       - name: Init Environment
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo apt-get update
-          sudo apt-get install -y $(curl -fsSL https://is.gd/depends_ubuntu_2204)
+          # OpenWrt/LEDE 官方常用依赖（稳定可复现，不用短链脚本）
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gperf haveged help2man intltool jq libelf-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev \
+            libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp \
+            nano ninja-build p7zip-full patch pkgconf python3 python3-distutils python3-pip \
+            python3-venv qemu-utils rsync scons subversion swig texinfo uglifyjs unzip \
+            upx-ucl vim wget xmlto xsltproc zlib1g-dev zstd
+          df -h
 
       - name: Clone and Setup
         run: |
           git clone --depth 1 https://github.com/coolsnowwolf/lede openwrt
           cd openwrt
+
+          # 1) 更新 feeds（先按 lede 默认）
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-          # --- 核心配置 ---
-          echo "CONFIG_TARGET_x86=y" > .config
-          echo "CONFIG_TARGET_x86_64=y" >> .config
-          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
-          echo "CONFIG_LUCI_LANG_zh_Hans=y" >> .config
-          
-          # 驱动：微软网卡
-          echo "CONFIG_PACKAGE_kmod-usb-net-rtl8152=y" >> .config
-          
-          # 科学上网：Passwall (Reality/VLESS/Argo)
-          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y" >> .config
-          
-          # 远程下载：替换为 Transmission
-          echo "CONFIG_PACKAGE_luci-app-transmission=y" >> .config
-          
-          # 磁盘与共享：Samba4 + Diskman (管理 128G SSD)
-          echo "CONFIG_PACKAGE_luci-app-samba4=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-diskman=y" >> .config
-          echo "CONFIG_PACKAGE_fdisk=y" >> .config
-          echo "CONFIG_PACKAGE_lsblk=y" >> .config
-          echo "CONFIG_PACKAGE_parted=y" >> .config
-          echo "CONFIG_PACKAGE_resize2fs=y" >> .config
-          
-          # 终端工具
-          echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
-          
-          # --- 预设网络拓扑 (192.168.2.1 | eth0=WAN | eth1=LAN) ---
-          sed -i 's/192.168.1.1/192.168.2.1/g' package/base-files/files/bin/config_generate
-          sed -i '/set network.$1.ipaddr/a \\t\t\tset network.lan.device=eth1\n\t\t\tset network.wan=interface\n\t\t\tset network.wan.device=eth0\n\t\t\tset network.wan.proto=dhcp' package/base-files/files/bin/config_generate
-          
+
+          # 2) 额外拉取你“必须要有”的第三方插件（避免 .config 写了但实际不存在）
+          # Passwall（含 Argo/Reality/VLESS 等常见能力，节点兼容 Argo 诉求）
+          rm -rf package/passwall || true
+          git clone --depth 1 https://github.com/xiaorouji/openwrt-passwall package/passwall
+
+          # Diskman（磁盘管理）
+          rm -rf package/luci-app-diskman || true
+          git clone --depth 1 https://github.com/lisaac/luci-app-diskman package/luci-app-diskman
+
+          # 再跑一次 feeds 安装，确保依赖能被识别
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # 3) 固化你的网络拓扑：LAN=eth1 / WAN=eth0 / LAN IP=192.168.2.1
+          # 用 uci-defaults 的方式最稳，不靠 sed 猜 config_generate 的行结构
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-fixed-network <<'EOF'
+          #!/bin/sh
+          uci -q batch <<EOT
+          set network.lan=interface
+          set network.lan.proto='static'
+          set network.lan.device='eth1'
+          set network.lan.ipaddr='192.168.2.1'
+          set network.lan.netmask='255.255.255.0'
+
+          set network.wan=interface
+          set network.wan.proto='dhcp'
+          set network.wan.device='eth0'
+          commit network
+          EOT
+          /etc/init.d/network restart
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-fixed-network
+
+          # 4) 写入 .config（核心：ROOTFS 10G，避免 package_install 爆）
+          cat > .config <<'EOF'
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+
+          # LuCI 中文
+          CONFIG_LUCI_LANG_zh_Hans=y
+
+          # ===== 关键：镜像分区 =====
+          # 10G 根分区（同时解决：编译安装阶段空间不足 + 装U盘后空间很小）
+          CONFIG_TARGET_KERNEL_PARTSIZE=64
+          CONFIG_TARGET_ROOTFS_PARTSIZE=10240
+          CONFIG_TARGET_IMAGES_GZ=y
+
+          # ===== USB 网卡驱动：RTL8152/8153 =====
+          CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
+
+          # ===== 科学上网：Passwall（兼容 Argo/Reality/VLESS 等常见模式）=====
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+
+          # ===== 远程下载 =====
+          CONFIG_PACKAGE_luci-app-transmission=y
+          CONFIG_PACKAGE_transmission-daemon=y
+          CONFIG_PACKAGE_transmission-web-control=y
+
+          # ===== 磁盘/文件共享：Diskman + Samba4（用于 128G SSD 局域网共享）=====
+          CONFIG_PACKAGE_luci-app-diskman=y
+          CONFIG_PACKAGE_luci-app-samba4=y
+          CONFIG_PACKAGE_samba4-server=y
+
+          # 文件系统/挂载常用组件（让 Diskman/挂载更稳）
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-usb-storage-uas=y
+          CONFIG_PACKAGE_kmod-scsi-core=y
+          CONFIG_PACKAGE_kmod-scsi-generic=y
+
+          # 磁盘工具
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_lsblk=y
+          CONFIG_PACKAGE_parted=y
+          CONFIG_PACKAGE_resize2fs=y
+          CONFIG_PACKAGE_e2fsprogs=y
+
+          # ===== 网页终端 =====
+          CONFIG_PACKAGE_luci-app-ttyd=y
+          EOF
+
           make defconfig
 
       - name: Download Sources
         run: |
           cd openwrt
-          # 尝试下载 3 次，防止网络抖动导致的编译失败
-          for i in {1..3}; do make download -j8 && break || sleep 10; done
+          for i in {1..3}; do
+            make download -j$(nproc) V=s && break || sleep 10
+          done
+          # 清理坏的/太小的下载残片，防止后面编译到一半才炸
+          find dl -size -1024c -delete
+          df -h
 
       - name: Final Compile
         run: |
           cd openwrt
-          # 先单独编译 tools 防止之前的报错重演
+          # 提前编译 toolchain，尽早失败、尽早定位
           make tools/compile -j$(nproc) || make tools/compile -j1 V=s
+          make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
           make -j$(nproc) || make -j1 V=s
+          df -h
 
       - name: Upload Firmware
         uses: actions/upload-artifact@v4
