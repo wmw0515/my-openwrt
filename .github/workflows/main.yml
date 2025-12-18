@@ -38,30 +38,37 @@ jobs:
 
       - name: Clone and Setup
         run: |
+          set -e
           git clone --depth 1 https://github.com/coolsnowwolf/lede openwrt
           cd openwrt
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          rm -rf package/passwall
+          # Passwall（固定使用你指定 repo 版本）
+          rm -rf package/passwall || true
           git clone --depth 1 https://github.com/xiaorouji/openwrt-passwall package/passwall
 
-          rm -rf package/luci-app-diskman
+          # Diskman（避免 feeds 版与手动版双份冲突）
+          rm -rf package/feeds/luci/luci-app-diskman package/luci-app-diskman || true
           git clone --depth 1 https://github.com/lisaac/luci-app-diskman package/luci-app-diskman
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # 强制移除 autosamba（避免与 samba4-server 冲突）
           rm -rf package/feeds/luci/luci-app-autosamba \
                  package/feeds/packages/autosamba \
-                 package/autosamba || true
+                 package/autosamba 2>/dev/null || true
 
+          # opkg 自检：缺失就立即失败，避免浪费时间
           if [ ! -f package/system/opkg/Makefile ]; then
             echo "[FATAL] opkg Makefile missing"
+            ls -la package/system || true
             exit 2
           fi
 
+          # 固化网络：LAN=eth1 / WAN=eth0 / 192.168.2.1
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/99-fixed-network <<'EOF'
           #!/bin/sh
@@ -71,6 +78,7 @@ jobs:
           set network.lan.device='eth1'
           set network.lan.ipaddr='192.168.2.1'
           set network.lan.netmask='255.255.255.0'
+
           set network.wan=interface
           set network.wan.proto='dhcp'
           set network.wan.device='eth0'
@@ -80,6 +88,7 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-fixed-network
 
+          # 固件配置：rootfs=3G + 你必须要的插件/驱动
           cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
@@ -118,18 +127,37 @@ jobs:
           CONFIG_PACKAGE_e2fsprogs=y
 
           CONFIG_PACKAGE_luci-app-ttyd=y
+
+          # 明确禁用 autosamba（避免 file clash）
+          CONFIG_PACKAGE_autosamba=n
+          CONFIG_PACKAGE_luci-app-autosamba=n
           EOF
 
           make defconfig
 
       - name: Download Sources
         run: |
+          set -e
           cd openwrt
-          for i in {1..5}; do
-            make download -j1 V=s && break || sleep 15
+
+          ok=0
+          for i in 1 2 3 4 5; do
+            echo "[INFO] make download attempt $i/5"
+            if make download -j1 V=s; then
+              ok=1
+              break
+            fi
+            echo "[WARN] download failed, sleep 15s..."
+            sleep 15
           done
+
+          if [ "$ok" -ne 1 ]; then
+            echo "[FATAL] make download failed after 5 attempts"
+            exit 1
+          fi
+
+          # 清掉坏包残片
           find dl -size -1024c -delete
-          make download V=s || exit 1
           df -h
 
       - name: Final Compile
@@ -137,10 +165,19 @@ jobs:
           set -e
           cd openwrt
 
+          # tools 容错：避免因为某些 tools 源临时抽风让你整条流水线白跑
           make tools/compile -j2 IGNORE_ERRORS=1 || make tools/compile -j1 V=s IGNORE_ERRORS=1
           make toolchain/compile -j2 || make toolchain/compile -j1 V=s
 
           (make -j2 || make -j1 V=s) 2>&1 | tee /home/runner/compile.log
+          df -h
+
+      - name: List firmware outputs
+        if: always()
+        run: |
+          cd openwrt
+          echo "=== firmware files (.img/.img.gz) ==="
+          find bin/targets -type f | grep -E '\.(img|img\.gz)$' || true
 
       - name: Upload Build Log
         if: always()
@@ -150,7 +187,9 @@ jobs:
           path: /home/runner/compile.log
 
       - name: Upload Firmware
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: OpenWrt_Firmware
-          path: openwrt/bin/targets/x86/64/*.img.gz
+          path: openwrt/bin/targets/**/**/*.img*
+          if-no-files-found: error
