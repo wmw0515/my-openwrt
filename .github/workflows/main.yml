@@ -60,16 +60,11 @@ jobs:
                  package/feeds/packages/autosamba \
                  package/autosamba 2>/dev/null || true
 
-          # ✅ 关键：opkg 自检与自动修复（避免你现在这个 No rule 报错）
+          # ✅ 关键：opkg 自检（缺失就直接失败，避免你再跑两小时才知道）
           if [ ! -f package/system/opkg/Makefile ]; then
-            echo "[FATAL] package/system/opkg/Makefile not found. Try to restore from git..."
-            ls -la package/system || true
-            git checkout -- package/system/opkg || true
-          fi
-
-          if [ ! -f package/system/opkg/Makefile ]; then
-            echo "[FATAL] opkg still missing. Abort early to avoid wasting hours."
+            echo "[FATAL] package/system/opkg/Makefile not found."
             echo "Tree snapshot:"
+            ls -la package/system || true
             find package/system -maxdepth 2 -type f -name Makefile -print | head -n 200 || true
             exit 2
           fi
@@ -94,7 +89,7 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-fixed-network
 
-          # .config（保持你的原需求：10G ROOTFS + Passwall + Transmission Web + Diskman + Samba4）
+          # .config（按你的需求，只把 ROOTFS 改成 3G，避免打包爆盘）
           cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
@@ -103,7 +98,7 @@ jobs:
           CONFIG_LUCI_LANG_zh_Hans=y
 
           CONFIG_TARGET_KERNEL_PARTSIZE=64
-          CONFIG_TARGET_ROOTFS_PARTSIZE=10240
+          CONFIG_TARGET_ROOTFS_PARTSIZE=3072
           CONFIG_TARGET_IMAGES_GZ=y
 
           CONFIG_PACKAGE_kmod-usb-net-rtl8152=y
@@ -144,8 +139,9 @@ jobs:
       - name: Download Sources
         run: |
           cd openwrt
-          for i in {1..3}; do
-            make download -j$(nproc) V=s && break || sleep 10
+          # ✅ 下载阶段更稳：单线程 + 多次重试（并发下载最容易 timeout/hash）
+          for i in {1..5}; do
+            make download -j1 V=s && break || (echo "[WARN] download failed, retry $i/5"; sleep 15)
           done
           find dl -size -1024c -delete
           df -h
@@ -157,15 +153,15 @@ jobs:
           make tools/compile -j$(nproc) || make tools/compile -j1 V=s
           make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
 
-          # 用 V=s 避免“看起来卡住”
-          (make -j$(nproc) V=s || make -j1 V=s) || {
-            echo "===== DF ====="; df -h || true
-            echo "===== Check opkg path ====="
-            ls -la package/system/opkg || true
-            echo "===== Find opkg Makefile ====="
-            find package/system -maxdepth 2 -type f -name Makefile -print | grep -i opkg || true
-            exit 2
-          }
+          # ✅ 关键：完整日志写入文件，避免 GitHub 截断导致你看不到真错误
+          (make -j$(nproc) || make -j1 V=s) 2>&1 | tee /home/runner/compile.log
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build_log
+          path: /home/runner/compile.log
 
       - name: Upload Firmware
         uses: actions/upload-artifact@v4
