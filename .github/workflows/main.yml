@@ -44,32 +44,24 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # Passwall
-          rm -rf package/passwall || true
+          rm -rf package/passwall
           git clone --depth 1 https://github.com/xiaorouji/openwrt-passwall package/passwall
 
-          # Diskman
-          rm -rf package/luci-app-diskman || true
+          rm -rf package/luci-app-diskman
           git clone --depth 1 https://github.com/lisaac/luci-app-diskman package/luci-app-diskman
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # ✅ 强制移除 autosamba（避免与 samba4-server 冲突）
           rm -rf package/feeds/luci/luci-app-autosamba \
                  package/feeds/packages/autosamba \
-                 package/autosamba 2>/dev/null || true
+                 package/autosamba || true
 
-          # ✅ 关键：opkg 自检（缺失就直接失败，避免你再跑两小时才知道）
           if [ ! -f package/system/opkg/Makefile ]; then
-            echo "[FATAL] package/system/opkg/Makefile not found."
-            echo "Tree snapshot:"
-            ls -la package/system || true
-            find package/system -maxdepth 2 -type f -name Makefile -print | head -n 200 || true
+            echo "[FATAL] opkg Makefile missing"
             exit 2
           fi
 
-          # 固化网络：LAN=eth1 / WAN=eth0 / 192.168.2.1
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/99-fixed-network <<'EOF'
           #!/bin/sh
@@ -79,7 +71,6 @@ jobs:
           set network.lan.device='eth1'
           set network.lan.ipaddr='192.168.2.1'
           set network.lan.netmask='255.255.255.0'
-
           set network.wan=interface
           set network.wan.proto='dhcp'
           set network.wan.device='eth0'
@@ -89,7 +80,6 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-fixed-network
 
-          # .config（按你的需求，只把 ROOTFS 改成 3G，避免打包爆盘）
           cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
@@ -128,10 +118,6 @@ jobs:
           CONFIG_PACKAGE_e2fsprogs=y
 
           CONFIG_PACKAGE_luci-app-ttyd=y
-
-          # ✅ 禁用 autosamba（否则与 samba4-server 冲突）
-          # CONFIG_PACKAGE_autosamba is not set
-          # CONFIG_PACKAGE_luci-app-autosamba is not set
           EOF
 
           make defconfig
@@ -139,22 +125,22 @@ jobs:
       - name: Download Sources
         run: |
           cd openwrt
-          # ✅ 下载阶段更稳：单线程 + 多次重试（并发下载最容易 timeout/hash）
           for i in {1..5}; do
-            make download -j1 V=s && break || (echo "[WARN] download failed, retry $i/5"; sleep 15)
+            make download -j1 V=s && break || sleep 15
           done
           find dl -size -1024c -delete
+          make download V=s || exit 1
           df -h
 
       - name: Final Compile
         run: |
           set -e
           cd openwrt
-          make tools/compile -j$(nproc) || make tools/compile -j1 V=s
-          make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
 
-          # ✅ 关键：完整日志写入文件，避免 GitHub 截断导致你看不到真错误
-          (make -j$(nproc) || make -j1 V=s) 2>&1 | tee /home/runner/compile.log
+          make tools/compile -j2 IGNORE_ERRORS=1 || make tools/compile -j1 V=s IGNORE_ERRORS=1
+          make toolchain/compile -j2 || make toolchain/compile -j1 V=s
+
+          (make -j2 || make -j1 V=s) 2>&1 | tee /home/runner/compile.log
 
       - name: Upload Build Log
         if: always()
