@@ -25,7 +25,6 @@ jobs:
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo apt-get update
-          # OpenWrt/LEDE 官方常用依赖（稳定可复现，不用短链脚本）
           sudo apt-get install -y \
             ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
             bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
@@ -59,8 +58,12 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # ✅ 强制移除 autosamba，避免与 samba4-server 冲突（文件 /etc/hotplug.d/block/20-smb）
+          rm -rf package/feeds/luci/luci-app-autosamba \
+                 package/feeds/packages/autosamba \
+                 package/autosamba 2>/dev/null || true
+
           # 3) 固化你的网络拓扑：LAN=eth1 / WAN=eth0 / LAN IP=192.168.2.1
-          # 用 uci-defaults 的方式最稳，不靠 sed 猜 config_generate 的行结构
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/99-fixed-network <<'EOF'
           #!/bin/sh
@@ -76,12 +79,11 @@ jobs:
           set network.wan.device='eth0'
           commit network
           EOT
-          /etc/init.d/network restart
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/99-fixed-network
 
-          # 4) 写入 .config（核心：ROOTFS 10G，避免 package_install 爆）
+          # 4) 写入 .config（核心：ROOTFS 10G）
           cat > .config <<'EOF'
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
@@ -91,7 +93,6 @@ jobs:
           CONFIG_LUCI_LANG_zh_Hans=y
 
           # ===== 关键：镜像分区 =====
-          # 10G 根分区（同时解决：编译安装阶段空间不足 + 装U盘后空间很小）
           CONFIG_TARGET_KERNEL_PARTSIZE=64
           CONFIG_TARGET_ROOTFS_PARTSIZE=10240
           CONFIG_TARGET_IMAGES_GZ=y
@@ -103,17 +104,17 @@ jobs:
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
 
-          # ===== 远程下载 =====
+          # ===== 远程下载（必须有前端页面）=====
           CONFIG_PACKAGE_luci-app-transmission=y
           CONFIG_PACKAGE_transmission-daemon=y
           CONFIG_PACKAGE_transmission-web-control=y
 
-          # ===== 磁盘/文件共享：Diskman + Samba4（用于 128G SSD 局域网共享）=====
+          # ===== 磁盘/文件共享：Diskman + Samba4 =====
           CONFIG_PACKAGE_luci-app-diskman=y
           CONFIG_PACKAGE_luci-app-samba4=y
           CONFIG_PACKAGE_samba4-server=y
 
-          # 文件系统/挂载常用组件（让 Diskman/挂载更稳）
+          # 文件系统/挂载常用组件
           CONFIG_PACKAGE_block-mount=y
           CONFIG_PACKAGE_kmod-fs-ext4=y
           CONFIG_PACKAGE_kmod-usb-storage=y
@@ -130,6 +131,10 @@ jobs:
 
           # ===== 网页终端 =====
           CONFIG_PACKAGE_luci-app-ttyd=y
+
+          # ✅ 禁用 autosamba（否则与 samba4-server 冲突）
+          # CONFIG_PACKAGE_autosamba is not set
+          # CONFIG_PACKAGE_luci-app-autosamba is not set
           EOF
 
           make defconfig
@@ -140,14 +145,12 @@ jobs:
           for i in {1..3}; do
             make download -j$(nproc) V=s && break || sleep 10
           done
-          # 清理坏的/太小的下载残片，防止后面编译到一半才炸
           find dl -size -1024c -delete
           df -h
 
       - name: Final Compile
         run: |
           cd openwrt
-          # 提前编译 toolchain，尽早失败、尽早定位
           make tools/compile -j$(nproc) || make tools/compile -j1 V=s
           make toolchain/compile -j$(nproc) || make toolchain/compile -j1 V=s
           make -j$(nproc) || make -j1 V=s
